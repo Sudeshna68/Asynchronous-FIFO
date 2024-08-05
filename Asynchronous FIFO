@@ -1,0 +1,171 @@
+module asynFIFO(input rclk, input wclk, input reset, input w_en, input r_en, input [datawidth-1:0] wdata, output reg [datawidth-1:0] rdata,
+output reg full, output reg empty);
+
+parameter datawidth = 16;
+parameter FIFOdepth = 8;
+parameter addrsize = 4;
+
+reg [datawidth-1:0] mem[FIFOdepth-1:0];
+reg [addrsize-1:0] wptr, rptr;
+
+// Gray code pointers
+reg [addrsize-1:0] wptr_g, rptr_g;
+// Synchronized Gray code pointers
+reg [addrsize-1:0] wptr_g_s1, wptr_g_s2;
+reg [addrsize-1:0] rptr_g_s1, rptr_g_s2;
+// Binary pointers converted from synchronized Gray code
+reg [addrsize-1:0] wptr_b_s2, rptr_b_s2;
+
+integer i;
+
+// Write pointer logic
+always @(posedge wclk or posedge reset) begin
+if (reset)
+   wptr <= 0;
+else if (w_en && !full) begin
+   mem[wptr] <= wdata;
+   wptr <= wptr + 1;
+end
+end
+
+// Read pointer logic
+always @(posedge rclk or posedge reset) begin
+if (reset)
+   rptr <= 0;
+else if (r_en && !empty) begin
+   rdata <= mem[rptr];
+   rptr <= rptr + 1;
+end
+end
+
+// Binary to Gray Conversion for write pointer
+always @(*) begin
+wptr_g[addrsize-1] = wptr[addrsize-1];
+for (i = addrsize-2; i >= 0; i = i - 1)
+     wptr_g[i] = wptr[i+1] ^ wptr[i];
+end
+
+// Binary to Gray Conversion for read pointer
+always @(*) begin
+rptr_g[addrsize-1] = rptr[addrsize-1];
+for (i = addrsize-2; i >= 0; i = i - 1)
+     rptr_g[i] = rptr[i+1] ^ rptr[i];
+end
+
+// 2-stage synchronizer for write pointer w.r.t read clock
+always @(posedge rclk or posedge reset) begin
+if (reset) begin
+    wptr_g_s1 <= 0;
+    wptr_g_s2 <= 0;
+end 
+else begin
+    wptr_g_s1 <= wptr_g;
+    wptr_g_s2 <= wptr_g_s1;
+end
+end
+
+// 2-stage synchronizer for read pointer w.r.t write clock
+always @(posedge wclk or posedge reset) begin
+if (reset) begin
+   rptr_g_s1 <= 0;
+   rptr_g_s2 <= 0;
+end 
+else begin
+   rptr_g_s1 <= rptr_g;
+   rptr_g_s2 <= rptr_g_s1;
+end
+end
+
+// Gray to binary for write pointer
+always @(*) begin
+wptr_b_s2[addrsize-1] = wptr_g_s2[addrsize-1];
+for (i = addrsize-2; i >= 0; i = i - 1)
+     wptr_b_s2[i] = wptr_b_s2[i+1] ^ wptr_g_s2[i];
+end
+
+// Gray to binary for read pointer
+always @(*) begin
+rptr_b_s2[addrsize-1] = rptr_g_s2[addrsize-1];
+for (i = addrsize-2; i >= 0; i = i - 1)
+    rptr_b_s2[i] = rptr_b_s2[i+1] ^ rptr_g_s2[i];
+end
+
+// Full flag logic
+always @(posedge wclk or posedge reset) begin
+if (reset)
+   full <= 0;
+else if (w_en && (({~wptr_b_s2[addrsize-1], wptr_b_s2[addrsize-2:0]} == rptr)))
+   full <= 1;
+else if (r_en && !empty)
+   full <= 0;
+end
+
+// Empty flag logic
+always @(posedge rclk or posedge reset) begin
+if (reset)
+   empty <= 1;
+else if (r_en && {~wptr_b_s2[3],wptr_b_s2[2:0]!=rptr[3:0]})
+   empty <= 1;
+else if (w_en && (rptr != wptr_b_s2))
+   empty <= 0;
+end
+endmodule
+
+
+
+
+TESTBENCH:
+module tb_asynFIFO();
+reg rclk, wclk, reset , w_en, r_en;
+reg [15:0] wdata;
+wire [15:0] rdata;
+wire full, empty;
+
+// Instantiate the FIFO
+asynFIFO uut ( .rclk(rclk), .wclk(wclk), .reset(reset), .w_en(w_en), .r_en(r_en), .wdata(wdata), .rdata(rdata),
+        .full(full), .empty(empty));
+
+// Clock generation for read and write clocks
+initial begin
+rclk = 0;
+forever #10 rclk = ~rclk; // Read clock with 20 time units period
+end
+
+initial begin
+wclk = 0;
+forever #5 wclk = ~wclk; // Write clock with 30 time units period
+end
+
+// Stimulus
+initial begin
+reset = 1; w_en = 0; r_en = 0; wdata = 16'h0000;
+#50 reset = 0;
+
+#20 w_en = 1; wdata = 16'hAAAA;
+#10 w_en = 0;
+#4 w_en = 1; wdata = 16'hBBBB;
+#9 w_en = 0;
+
+#12 r_en = 1;
+#27 r_en = 0;
+#32 r_en = 1;
+#5 r_en = 0;
+
+#20 w_en = 1; wdata = 16'hDDDD;
+#30 w_en = 1; wdata = 16'hEEEE;
+#30 w_en = 1; wdata = 16'hFFFF;
+
+#60 r_en = 0;
+#50 r_en = 1;
+#60 r_en = 0;
+
+#100 $finish;
+end
+
+// Monitor signals
+initial begin
+$monitor("Time = %0t, reset = %b, w_en = %b, r_en = %b, wdata = %h, rdata = %h, full = %b, empty = %b", 
+                 $time, reset, w_en, r_en, wdata, rdata, full, empty);
+end
+
+endmodule
